@@ -158,4 +158,492 @@ nav button[aria-selected="true"]{color:var(--ink);border-top-color:var(--bib)}
 <script>
 /* ---------- config ---------- */
 const SB_URL = 'https://szjmfoicxzmdcesehcvp.supabase.co';
-const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6am1mb2ljeHptZGNlc2VoY3ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0Mzg4MDUsImV4cCI6MjA5MzAxNDgwNX0.4PtF0yCzkT
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6am1mb2ljeHptZGNlc2VoY3ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0Mzg4MDUsImV4cCI6MjA5MzAxNDgwNX0.4PtF0yCzkT_kzm-DwZDc51hVx9wok3jPj_tPf7sWhDA';
+const START = '2026-10-07';
+const END = '2026-11-30';
+const LOCK_DAYS = 3;
+const PLAYERS = ['Beau', 'Annalise'];
+const CHECKS = [['water','💧','Drank water'],['workout','💪','Worked out'],['sleep','😴','Slept well'],['no_sugar','🍭','No refined sugar']];
+
+/* ---------- helpers (defined before any rendering) ---------- */
+const $ = id => document.getElementById(id);
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+const parseD = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (s, n) => { const d = parseD(s); d.setDate(d.getDate() + n); return ymd(d); };
+const daysBetween = (a, b) => Math.round((parseD(b) - parseD(a)) / 86400000);
+const todayStr = () => ymd(new Date());
+const fmtLong = s => parseD(s).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+const fmtShort = s => parseD(s).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+const fmtDow = s => parseD(s).toLocaleDateString('en-US', { weekday: 'short' });
+const num = n => Math.round(n).toLocaleString('en-US');
+const pts = steps => steps >= 3000 ? 1 + Math.floor((steps - 3000) / 1000) : 0;
+const TOTAL_DAYS = daysBetween(START, END) + 1;
+const LOCK_DATE = addDays(END, LOCK_DAYS);
+function phase(t) { if (t < START) return 'before'; if (t <= END) return 'live'; if (t <= LOCK_DATE) return 'grace'; return 'locked'; }
+// Ties share a rank (1, 1 rather than 1, 2)
+function rankOf(list, key) { return list.map(x => 1 + list.filter(y => y[key] > x[key]).length); }
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const BADGES = [
+  ['first', '👟', 'First Steps', 'Log your first day of steps'],
+  ['s3', '🔥3', '3-Day Streak', 'Hit the goal 3 days in a row'],
+  ['s7', '🔥7', '7-Day Streak', 'Hit the goal 7 days in a row'],
+  ['s14', '🔥14', '14-Day Streak', 'Hit the goal 14 days in a row'],
+  ['k10', '💯', '10K Day', 'Walk 10,000+ steps in one day'],
+  ['k20', '🚀', '20K Day', 'Walk 20,000+ steps in one day'],
+  ['perfect', '✨', 'Perfect Week', 'All four check-ins, 7 days in a row'],
+  ['comeback', '👑', 'Comeback', 'Retake the lead after trailing']
+];
+function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+
+/* ---------- state ---------- */
+let entries = { Beau: {}, Annalise: {} };
+let checks = { Beau: {}, Annalise: {} };
+let loaded = false, loading = false, saving = false;
+const savedName = recall('duelName');
+const sel = { player: PLAYERS.includes(savedName) ? savedName : null, date: null, toggles: {}, histPlayer: null, tab: 'board' };
+
+/* ---------- API ---------- */
+async function api(path, opts = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch(SB_URL + '/rest/v1/' + path, {
+      ...opts, signal: ctrl.signal,
+      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', ...(opts.headers || {}) }
+    });
+    const txt = await r.text();
+    let body = null; try { body = txt ? JSON.parse(txt) : null; } catch (e) {}
+    if (!r.ok) { const e = new Error((body && body.message) || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+    return body;
+  } finally { clearTimeout(timer); }
+}
+
+async function loadAll() {
+  const [s, c] = await Promise.all([
+    api('duel_steps_entries?select=player,entry_date,steps&order=entry_date'),
+    api('duel_checkins?select=player,entry_date,water,workout,sleep,no_sugar&order=entry_date')
+  ]);
+  const E = { Beau: {}, Annalise: {} }, C = { Beau: {}, Annalise: {} };
+  for (const r of s || []) if (E[r.player]) E[r.player][r.entry_date] = r.steps;
+  for (const r of c || []) if (C[r.player]) C[r.player][r.entry_date] = r;
+  entries = E; checks = C;
+}
+
+// POST upsert first; if that fails, PATCH the existing row.
+async function upsert(table, row) {
+  try {
+    const res = await api(table + '?on_conflict=player,entry_date', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(row)
+    });
+    if (Array.isArray(res) && res.length) return res[0];
+    throw new Error('Upsert returned no row');
+  } catch (e) {
+    const { player, entry_date, ...rest } = row;
+    const q = table + '?player=eq.' + encodeURIComponent(player) + '&entry_date=eq.' + entry_date;
+    let res;
+    try { res = await api(q, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(rest) }); }
+    catch (e2) { throw e; }
+    if (Array.isArray(res) && res.length) return res[0];
+    throw e;
+  }
+}
+
+async function refresh() {
+  if (loading || saving) return;
+  loading = true;
+  try {
+    await loadAll();
+    loaded = true;
+    $('errMsg').hidden = true;
+  } catch (e) {
+    $('errMsg').hidden = false;
+  } finally {
+    loading = false;
+    $('loadMsg').hidden = true;
+    render();
+  }
+}
+
+/* ---------- stats ---------- */
+function statsFor(p, t) {
+  const last = t < END ? t : END;
+  const days = [];
+  if (t >= START) for (let d = START; d <= last; d = addDays(d, 1)) days.push(d);
+  let points = 0, steps = 0, goal = 0;
+  for (const d of days) { const s = entries[p][d]; if (s != null) { points += pts(s); steps += s; if (s >= 3000) goal++; } }
+  let streak = 0, d = last;
+  if (d === t && entries[p][d] == null) d = addDays(d, -1); // today not logged yet doesn't break the streak
+  while (d >= START && (entries[p][d] || 0) >= 3000) { streak++; d = addDays(d, -1); }
+  let counted = days.length;
+  if (t <= END && entries[p][t] == null) counted -= 1;
+  const proj = t > END ? points : counted > 0 ? Math.round(points / counted * TOTAL_DAYS) : 0;
+  const wk = days.slice(-7);
+  const tally = CHECKS.map(([k, e]) => [e, wk.filter(x => checks[p][x] && checks[p][x][k]).length]);
+  return { p, points, miles: steps / 2000, goal, streak, proj, wkLen: wk.length, tally, elapsed: days.length };
+}
+
+/* ---------- badges & lead ---------- */
+function comebackSet(t) {
+  const out = new Set(), tot = { Beau: 0, Annalise: 0 };
+  if (t < START) return out;
+  const last = t < END ? t : END; let lead = null;
+  for (let d = START; d <= last; d = addDays(d, 1)) {
+    for (const p of PLAYERS) { const s = entries[p][d]; if (s != null) tot[p] += pts(s); }
+    const l = tot.Beau > tot.Annalise ? 'Beau' : tot.Annalise > tot.Beau ? 'Annalise' : null;
+    if (l && lead && l !== lead) out.add(l);
+    if (l) lead = l;
+  }
+  return out;
+}
+function badgesFor(p, t, cb) {
+  const got = new Set();
+  if (t >= START) {
+    const last = t < END ? t : END; let run = 0, best = 0, pw = 0;
+    for (let d = START; d <= last; d = addDays(d, 1)) {
+      const s = entries[p][d], c = checks[p][d];
+      if (s != null) got.add('first');
+      if (s >= 10000) got.add('k10');
+      if (s >= 20000) got.add('k20');
+      run = (s || 0) >= 3000 ? run + 1 : 0; best = Math.max(best, run);
+      pw = c && CHECKS.every(([k]) => c[k]) ? pw + 1 : 0; if (pw >= 7) got.add('perfect');
+    }
+    if (best >= 3) got.add('s3'); if (best >= 7) got.add('s7'); if (best >= 14) got.add('s14');
+    if (cb.has(p)) got.add('comeback');
+  }
+  return BADGES.filter(b => got.has(b[0]));
+}
+let leadMsg = null;
+function checkLead(st) {
+  if (!loaded) return;
+  const [a, b] = st;
+  const l = a.points > b.points ? a.p : b.points > a.points ? b.p : null;
+  if (!l) return;
+  const prev = recall('duelLeader');
+  if (prev && prev !== l) leadMsg = '👑 ' + l + ' took the lead!';
+  if (prev !== l) store('duelLeader', l);
+}
+
+/* ---------- motion ---------- */
+const shownPts = {};
+let lastMargin = null;
+function countUp(el, from, to) {
+  const dur = 700, t0 = performance.now();
+  const step = now => {
+    const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    el.textContent = Math.round(from + (to - from) * e);
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+let confettiCount = 0;
+function confetti() {
+  if (reducedMotion()) return;
+  const c = $('confetti'), ctx = c.getContext && c.getContext('2d');
+  if (!ctx) return;
+  confettiCount++; window.__confettiCount = confettiCount;
+  const W = c.width = innerWidth, H = c.height = innerHeight; c.hidden = false;
+  const cols = ['#F4D03F', '#2F5D46', '#8FBF9F', '#FFFFFF', '#3A2E00'];
+  const ps = Array.from({ length: 120 }, () => ({ x: W / 2, y: H * 0.55, vx: (Math.random() - .5) * 14, vy: -Math.random() * 14 - 6,
+    r: Math.random() * 6 + 5, c: cols[Math.floor(Math.random() * cols.length)], a: Math.random() * 6, va: (Math.random() - .5) * .4 }));
+  const t0 = performance.now();
+  const frame = now => {
+    const el = now - t0; ctx.clearRect(0, 0, W, H);
+    for (const p of ps) {
+      p.vy += .45; p.x += p.vx; p.y += p.vy; p.vx *= .99; p.a += p.va;
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.a); ctx.globalAlpha = Math.max(0, 1 - el / 1800);
+      ctx.fillStyle = p.c; ctx.fillRect(-p.r / 2, -p.r / 4, p.r, p.r / 2); ctx.restore();
+    }
+    if (el < 1800) requestAnimationFrame(frame); else { ctx.clearRect(0, 0, W, H); c.hidden = true; }
+  };
+  requestAnimationFrame(frame);
+}
+
+/* ---------- render ---------- */
+function render() {
+  const t = todayStr(), ph = phase(t);
+  const day = Math.min(daysBetween(START, t) + 1, TOTAL_DAYS);
+  $('dayLabel').textContent = ph === 'before' ? 'Starts ' + fmtLong(START)
+    : ph === 'live' ? 'Day ' + day + ' of ' + TOTAL_DAYS + ' · ends ' + fmtShort(END)
+    : 'Ended ' + fmtLong(END);
+  const pm = $('phaseMsg');
+  if (ph === 'before') { pm.hidden = false; pm.textContent = 'The duel starts ' + fmtLong(START) + '. Logging opens that day.'; }
+  else pm.hidden = true;
+  const st = PLAYERS.map(p => statsFor(p, t));
+  checkLead(st);
+  $('leadAlert').hidden = !leadMsg; $('leadAlertText').textContent = leadMsg || '';
+  renderBoard(t, ph, st); renderLog(t, ph); renderHistory(t, ph); renderRules(t);
+}
+
+function renderBoard(t, ph, st) {
+  const cb = comebackSet(t);
+  const ranks = rankOf(st, 'points');
+  const order = st.map((s, i) => ({ s, r: ranks[i] })).sort((a, b) => a.r - b.r);
+  const [a, b] = order;
+  const diff = a.s.points - b.s.points;
+  let top = '';
+  if (ph === 'grace' || ph === 'locked') {
+    const head = diff === 0 ? 'It\'s a tie at ' + a.s.points + ' pts' : '🏆 ' + a.s.p + ' wins ' + a.s.points + '–' + b.s.points;
+    const note = ph === 'grace' ? 'Final results. Late logs accepted through ' + fmtLong(LOCK_DATE) + '.' : 'Final results. Logging is closed.';
+    top = '<div class="bib final" id="finalBanner">' + head + '<small>' + note + '</small></div>';
+  } else {
+    top = '<div class="bib margin" id="marginBib">' + (diff === 0 ? 'All square' : a.s.p + ' ' + diff + ' pt' + (diff === 1 ? '' : 's') + ' ahead') + '</div>';
+  }
+  const bdg = {}; for (const p of PLAYERS) bdg[p] = badgesFor(p, t, cb);
+  const board = $('tab-board'), vis = !board.hidden, oldX = {};
+  if (vis) board.querySelectorAll('.card[data-player]').forEach(el => { oldX[el.dataset.player] = el.offsetLeft; });
+  const cards = order.map(({ s, r }) => {
+    const lead = r === 1 && diff !== 0 ? ' lead' : '';
+    return '<div class="card' + lead + '" data-player="' + s.p + '">' +
+      '<div class="rank">#' + r + '</div><div class="pname">' + s.p + '</div>' +
+      '<div class="big"><b class="ptsnum" data-p="' + s.p + '">' + (reducedMotion() || shownPts[s.p] == null ? s.points : shownPts[s.p]) + '</b><span>pts</span></div>' +
+      '<div class="stat"><span>Miles</span><b>' + s.miles.toFixed(1) + '</b></div>' +
+      '<div class="stat"><span>Goal days</span><b>' + s.goal + '/' + s.elapsed + '</b></div>' +
+      '<div class="stat"><span>Streak</span><b>' + s.streak + (s.streak ? ' 🔥' : '') + '</b></div>' +
+      '<div class="stat"><span>' + (t > END ? 'Final' : 'Projected') + '</span><b>' + s.proj + '</b></div>' +
+      '<div class="tally" aria-label="Check-ins, last 7 days">' + s.tally.map(([e, n]) => '<span>' + e + ' ' + n + '/' + s.wkLen + '</span>').join('') + '</div>' +
+      (ph === 'live' ? (entries[s.p][t] != null ? '<div class="today yes">✓ Logged today</div>' : '<div class="today">Not logged yet today</div>') : '') +
+      (bdg[s.p].length ? '<div class="badges">' + bdg[s.p].map(x => '<span class="badge" title="' + x[2] + '" aria-label="' + x[2] + '">' + x[1] + '</span>').join('') + '</div>' : '') +
+      '</div>';
+  }).join('');
+  board.innerHTML = top + '<div class="duo">' + cards + '</div>' +
+    '<div class="sub" style="margin-top:10px">Check-ins count the last 7 days. Refreshes every minute.</div>';
+  const motion = !reducedMotion();
+  // count up only when a number changes
+  for (const s of st) {
+    const el = board.querySelector('.ptsnum[data-p="' + s.p + '"]');
+    const from = shownPts[s.p];
+    if (motion && from != null && from !== s.points && el) countUp(el, from, s.points);
+    else if (el) el.textContent = s.points;
+    shownPts[s.p] = s.points;
+  }
+  if (motion && vis) {
+    // slide cards when positions swap
+    board.querySelectorAll('.card[data-player]').forEach(el => {
+      const o = oldX[el.dataset.player]; if (o == null) return;
+      const dx = o - el.offsetLeft;
+      if (Math.abs(dx) > 1 && el.animate) el.animate([{ transform: 'translateX(' + dx + 'px)' }, { transform: 'none' }], { duration: 550, easing: 'cubic-bezier(.2,.8,.2,1)' });
+    });
+    const mb = $('marginBib') || $('finalBanner');
+    if (mb && lastMargin !== null && lastMargin !== mb.textContent && mb.animate)
+      mb.animate([{ transform: 'scale(1.06)' }, { transform: 'none' }], { duration: 400, easing: 'ease-out' });
+  }
+  const mb2 = $('marginBib') || $('finalBanner'); lastMargin = mb2 ? mb2.textContent : null;
+}
+
+function canLogDate(d, t) {
+  const ph = phase(t);
+  if (ph === 'before' || ph === 'locked') return false;
+  return d >= START && d <= (t < END ? t : END);
+}
+
+function defaultDate(t) { return t < START ? START : t > END ? END : t; }
+
+function renderLog(t, ph) {
+  const closed = ph === 'before' || ph === 'locked';
+  $('logClosed').hidden = !closed;
+  $('logForm').hidden = closed;
+  if (ph === 'before') $('logClosed').textContent = 'Logging opens ' + fmtLong(START) + '.';
+  if (ph === 'locked') $('logClosed').textContent = 'Logging closed on ' + fmtLong(LOCK_DATE) + '. Thanks for playing.';
+  if (closed) return;
+  if (!sel.date || !canLogDate(sel.date, t)) setDate(defaultDate(t), true);
+  $('namePick').innerHTML = PLAYERS.map(p => '<button data-name="' + p + '" aria-pressed="' + (sel.player === p) + '">' + p + '</button>').join('');
+  const y = addDays(t, -1);
+  $('todayBtn').hidden = t > END;
+  $('todayBtn').setAttribute('aria-pressed', sel.date === t);
+  $('yestBtn').disabled = !canLogDate(y, t);
+  $('yestBtn').setAttribute('aria-pressed', sel.date === y);
+  $('datePick').min = START; $('datePick').max = t < END ? t : END; $('datePick').value = sel.date;
+  $('forLabel').textContent = 'Logging for ' + fmtLong(sel.date);
+  const ex = sel.player ? entries[sel.player][sel.date] : null;
+  $('existHint').textContent = !sel.player ? 'Pick your name to start.'
+    : ex != null ? 'Already logged: ' + num(ex) + ' steps (' + pts(ex) + ' pts)' : 'No steps logged for this day yet.';
+  $('checkBtns').innerHTML = CHECKS.map(([k, e, label]) => '<button data-check="' + k + '" aria-pressed="' + !!sel.toggles[k] + '">' + e + ' ' + label + '</button>').join('');
+  updateLivePts();
+}
+
+function loadToggles() {
+  const c = sel.player ? checks[sel.player][sel.date] : null;
+  sel.toggles = {}; for (const [k] of CHECKS) sel.toggles[k] = !!(c && c[k]);
+}
+
+function setDate(d, quiet) {
+  sel.date = d; loadToggles();
+  if (!quiet) { $('stepsIn').value = ''; clearMsg(); }
+}
+
+function updateLivePts() {
+  const raw = $('stepsIn').value.trim().replace(/,/g, '');
+  $('livePts').textContent = raw === '' ? '0' : /^\d+$/.test(raw) ? pts(parseInt(raw, 10)) : '–';
+}
+
+function renderHistory(t, ph) {
+  if (!sel.histPlayer) sel.histPlayer = sel.player || 'Beau';
+  $('histPick').innerHTML = PLAYERS.map(p => '<button data-hist="' + p + '" aria-pressed="' + (sel.histPlayer === p) + '">' + p + '</button>').join('');
+  if (t < START) { $('histList').innerHTML = '<p class="sub">Nothing yet. The duel starts ' + fmtLong(START) + '.</p>'; return; }
+  const p = sel.histPlayer, last = t < END ? t : END, editable = ph === 'live' || ph === 'grace';
+  let html = '';
+  for (let d = last; d >= START; d = addDays(d, -1)) {
+    const s = entries[p][d], c = checks[p][d];
+    const icons = CHECKS.map(([k, e]) => '<span class="' + (c && c[k] ? '' : 'off') + '">' + e + '</span>').join('');
+    const has = s != null || !!c;
+    html += '<div class="row" data-date="' + d + '"><div class="d">' + fmtShort(d) + '</div>' +
+      '<div class="s">' + (s != null ? '<b>' + num(s) + '</b> steps · ' + pts(s) + ' pts' : '<span class="sub">No steps</span>') +
+      '<div class="ic">' + icons + '</div></div>' +
+      (editable ? '<button data-edit="' + d + '">' + (has ? 'Edit' : 'Add') + '</button>' : '<span></span>') + '</div>';
+  }
+  $('histList').innerHTML = html;
+}
+
+function renderRules(t) {
+  const cb = comebackSet(t), earned = {};
+  for (const p of PLAYERS) for (const b of badgesFor(p, t, cb)) (earned[b[0]] = earned[b[0]] || []).push(p);
+  const ex = [2500, 3000, 4000, 7500, 10000, 15250];
+  $('tab-rules').innerHTML =
+    '<div class="card"><p><b>The goal:</b> 1.5 miles a day, about 3,000 steps. Hit it and you get 1 point.</p>' +
+    '<p><b>Bonus:</b> every full 1,000 steps over 3,000 adds another point.</p>' +
+    '<table><tr><th>Steps</th><th>Points</th></tr>' + ex.map(s => '<tr><td>' + num(s) + '</td><td>' + pts(s) + '</td></tr>').join('') + '</table>' +
+    '<p><b>Check-ins</b> (💧 water, 💪 workout, 😴 sleep, 🍭 no refined sugar) are for tracking only. They don\'t score points.</p>' +
+    '<ul><li>Runs ' + fmtLong(START) + ' through ' + fmtLong(END) + '.</li>' +
+    '<li>Log today or any past day. Future days are blocked.</li>' +
+    '<li>Late logs are accepted through ' + fmtLong(LOCK_DATE) + ', then logging locks.</li>' +
+    '<li>Miles are steps ÷ 2,000. Projected points assume your pace so far holds.</li>' +
+    '<li>Most points on ' + fmtShort(END) + ' wins. Ties share a rank.</li></ul></div>' +
+    '<div class="card" style="margin-top:10px" id="badgeList"><p style="margin-top:0"><b>Badges</b>. Just for bragging rights.</p>' +
+    BADGES.map(([k, e, name, desc]) => '<div class="brow"><div class="e">' + e + '</div><div><b>' + name + '</b>: ' + desc +
+      '<div class="sub" style="margin-top:2px">' + (earned[k] ? 'Earned by ' + earned[k].join(' and ') : 'Not earned yet') + '</div></div></div>').join('') + '</div>';
+}
+
+/* ---------- save ---------- */
+function clearMsg() { const m = $('saveMsg'); m.className = 'msg'; m.textContent = ''; }
+function showMsg(text, ok) { const m = $('saveMsg'); m.className = 'msg ' + (ok ? 'ok' : 'bad'); m.textContent = text; }
+
+function friendlyError(e) {
+  const m = (e && e.message) || '';
+  if (/future/i.test(m)) return 'That date hasn\'t happened yet.';
+  if (/check constraint|violates/i.test(m)) return 'That entry isn\'t allowed (check the date and number).';
+  if (e && e.name === 'AbortError') return 'The server took too long. Try again in a moment.';
+  return 'Couldn\'t save. Check your connection and try again.';
+}
+
+async function save() {
+  if (saving) return;
+  clearMsg();
+  const t = todayStr(), player = sel.player, date = sel.date;
+  if (!player) return showMsg('Pick your name first.', false);
+  if (!canLogDate(date, t)) return showMsg('You can\'t log that date.', false);
+  const raw = $('stepsIn').value.trim().replace(/,/g, '');
+  let steps = null;
+  if (raw !== '') {
+    if (!/^\d+$/.test(raw)) return showMsg('Whole numbers only, with no decimals or letters.', false);
+    steps = parseInt(raw, 10);
+    if (steps > 80000) return showMsg('80,000 is the most you can log for one day.', false);
+    if (steps < 1000 && !confirm('Only ' + num(steps) + ' steps? Check for a missing zero.\n\nSave anyway?')) return;
+    if (steps > 40000 && !confirm(num(steps) + ' steps is a lot. Make sure it\'s one day, not a weekly total.\n\nSave anyway?')) return;
+    const ex = entries[player][date];
+    if (ex != null && ex !== steps && !confirm(player + ' already has ' + num(ex) + ' for ' + fmtDow(date) + '. Replace?')) return;
+  }
+  const exC = checks[player][date];
+  const ck = {}; for (const [k] of CHECKS) ck[k] = !!sel.toggles[k];
+  const ckChanged = CHECKS.some(([k]) => ck[k] !== !!(exC && exC[k]));
+  if (steps === null && !ckChanged) return showMsg('Enter your steps or tap a check-in.', false);
+
+  saving = true;
+  const btn = $('saveBtn'); btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    if (steps !== null) await upsert('duel_steps_entries', { player, entry_date: date, steps });
+    if (ckChanged) await upsert('duel_checkins', { player, entry_date: date, ...ck });
+    await loadAll();
+    const okS = steps === null || entries[player][date] === steps;
+    const nc = checks[player][date];
+    const okC = !ckChanged || (nc && CHECKS.every(([k]) => !!nc[k] === ck[k]));
+    if (!okS || !okC) throw new Error('verify');
+    $('stepsIn').value = '';
+    saving = false;
+    render();
+    const what = steps !== null ? num(steps) + ' steps, ' + pts(steps) + ' pts' : 'check-ins';
+    showMsg('Saved: ' + player + ', ' + fmtShort(date) + ' (' + what + ')', true);
+    confetti();
+  } catch (e) {
+    showMsg(e.message === 'verify' ? 'Save couldn\'t be confirmed. Try again.' : friendlyError(e), false);
+  } finally {
+    saving = false; btn.disabled = false; btn.textContent = 'Save';
+  }
+}
+
+/* ---------- events ---------- */
+function showTab(tab) {
+  sel.tab = tab;
+  for (const b of document.querySelectorAll('nav button')) b.setAttribute('aria-selected', b.dataset.tab === tab);
+  for (const s of ['board', 'log', 'history', 'rules']) $('tab-' + s).hidden = s !== tab;
+  window.scrollTo(0, 0);
+}
+document.querySelector('nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
+$('namePick').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  sel.player = b.dataset.name; store('duelName', sel.player); setDate(sel.date); render();
+});
+$('todayBtn').addEventListener('click', () => { setDate(todayStr()); render(); });
+$('yestBtn').addEventListener('click', () => { setDate(addDays(todayStr(), -1)); render(); });
+$('datePick').addEventListener('change', e => {
+  const v = e.target.value;
+  if (v && canLogDate(v, todayStr())) { setDate(v); render(); }
+  else { showMsg('Pick a date between ' + fmtShort(START) + ' and today.', false); e.target.value = sel.date; }
+});
+$('stepsIn').addEventListener('input', updateLivePts);
+$('stepsIn').addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
+$('checkBtns').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const k = b.dataset.check; sel.toggles[k] = !sel.toggles[k]; b.setAttribute('aria-pressed', sel.toggles[k]);
+});
+$('saveBtn').addEventListener('click', save);
+$('histPick').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { sel.histPlayer = b.dataset.hist; render(); } });
+$('histList').addEventListener('click', e => {
+  const b = e.target.closest('button[data-edit]'); if (!b) return;
+  sel.player = sel.histPlayer; store('duelName', sel.player);
+  setDate(b.dataset.edit);
+  const s = entries[sel.player][sel.date];
+  render();
+  $('stepsIn').value = s != null ? String(s) : ''; updateLivePts();
+  showTab('log');
+});
+$('retryBtn').addEventListener('click', () => { $('loadMsg').hidden = false; refresh(); });
+$('themeBtn').addEventListener('click', () => {
+  const dark = document.documentElement.dataset.theme
+    ? document.documentElement.dataset.theme === 'dark'
+    : matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+  store('duelTheme', document.documentElement.dataset.theme);
+});
+const th = recall('duelTheme'); if (th) document.documentElement.dataset.theme = th;
+
+function maybeWelcome() {
+  if (recall('duelWelcomed') || recall('duelName') || phase(todayStr()) === 'locked') return;
+  $('wDates').textContent = fmtShort(START) + ' to ' + fmtShort(END);
+  $('welcome').hidden = false;
+}
+function closeWelcome() { store('duelWelcomed', '1'); $('welcome').hidden = true; }
+$('welcomePick').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  sel.player = b.dataset.w; sel.histPlayer = sel.player; store('duelName', sel.player);
+  closeWelcome();
+  if (sel.date) setDate(sel.date, true);
+  render(); showTab(canLogDate(defaultDate(todayStr()), todayStr()) ? 'log' : 'board');
+});
+$('welcomeSkip').addEventListener('click', closeWelcome);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('welcome').hidden) closeWelcome(); });
+$('leadAlertX').addEventListener('click', () => { leadMsg = null; $('leadAlert').hidden = true; });
+
+maybeWelcome();
+setInterval(refresh, 60000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
+window.addEventListener('pageshow', e => { if (e.persisted) refresh(); });
+
+render();
+refresh();
+</script>
+</body>
+</html>
