@@ -74,6 +74,22 @@ th{font-family:'Barlow Condensed',sans-serif;font-weight:600;font-size:16px}
 nav{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);display:flex;padding-bottom:env(safe-area-inset-bottom,0)}
 nav button{flex:1;font-family:'Barlow Condensed',sans-serif;font-weight:600;font-size:17px;background:none;border:0;color:var(--muted);padding:12px 0 14px;border-top:3px solid transparent}
 nav button[aria-selected="true"]{color:var(--ink);border-top-color:var(--bib)}
+.today{font-size:13px;margin-top:6px;color:var(--muted)}
+.today.yes{color:var(--pine);font-weight:600}
+.badges{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.badge{background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:1px 7px;font-size:14px;line-height:1.5}
+.alert{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;margin-bottom:10px;font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-weight:700;font-size:20px;animation:pop .35s ease-out}
+.alert button{background:none;border:0;font-size:22px;line-height:1;color:inherit;padding:0 4px}
+.overlay{position:fixed;inset:0;background:rgba(10,20,15,.6);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50}
+.welcome{max-width:380px;width:100%;padding:18px;animation:pop .35s ease-out}
+.welcome h2{font-family:'Barlow Condensed','Arial Narrow',sans-serif;font-size:30px;line-height:1;margin:0 0 10px;text-transform:uppercase}
+.welcome p{margin:0 0 10px;font-size:15px}
+.linkbtn{font:inherit;background:none;border:0;color:var(--muted);text-decoration:underline;padding:6px 0}
+.brow{display:grid;grid-template-columns:44px 1fr;gap:8px;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
+.brow .e{font-size:20px;text-align:center}
+#confetti{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:60}
+@keyframes pop{0%{transform:scale(.92);opacity:0}100%{transform:none;opacity:1}}
+@media (prefers-reduced-motion:reduce){.alert,.welcome{animation:none}}
 [hidden]{display:none!important}
 </style>
 </head>
@@ -86,6 +102,7 @@ nav button[aria-selected="true"]{color:var(--ink);border-top-color:var(--bib)}
   <div class="banner info" id="loadMsg">Loading scores…</div>
   <div class="banner err" id="errMsg" hidden><span>Couldn't load scores.</span><button id="retryBtn">Try again</button></div>
   <div class="banner info" id="phaseMsg" hidden></div>
+  <div class="bib alert" id="leadAlert" role="status" hidden><span id="leadAlertText"></span><button id="leadAlertX" aria-label="Dismiss">×</button></div>
 
   <section id="tab-board"></section>
 
@@ -118,6 +135,19 @@ nav button[aria-selected="true"]{color:var(--ink);border-top-color:var(--bib)}
   <section id="tab-rules" class="rules" hidden></section>
 </div>
 
+<div class="overlay" id="welcome" role="dialog" aria-modal="true" aria-labelledby="welcomeTitle" hidden>
+  <div class="card welcome">
+    <h2 id="welcomeTitle">Welcome to the duel</h2>
+    <p>Beau vs Annalise, <span id="wDates"></span>.</p>
+    <p>Walk about 3,000 steps (1.5 miles) a day for 1 point. Every full 1,000 steps after that adds another.</p>
+    <p>Daily check-ins for 💧 water, 💪 workouts, 😴 sleep and 🍭 no sugar are for tracking, not points.</p>
+    <p><b>Who's using this phone?</b></p>
+    <div class="seg" id="welcomePick"><button data-w="Beau">Beau</button><button data-w="Annalise">Annalise</button></div>
+    <button class="linkbtn" id="welcomeSkip">Just looking</button>
+  </div>
+</div>
+<canvas id="confetti" hidden></canvas>
+
 <nav role="tablist">
   <button role="tab" data-tab="board" aria-selected="true">Board</button>
   <button role="tab" data-tab="log" aria-selected="false">Log</button>
@@ -128,354 +158,4 @@ nav button[aria-selected="true"]{color:var(--ink);border-top-color:var(--bib)}
 <script>
 /* ---------- config ---------- */
 const SB_URL = 'https://szjmfoicxzmdcesehcvp.supabase.co';
-const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6am1mb2ljeHptZGNlc2VoY3ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0Mzg4MDUsImV4cCI6MjA5MzAxNDgwNX0.4PtF0yCzkT_kzm-DwZDc51hVx9wok3jPj_tPf7sWhDA';
-const START = '2026-10-07';
-const END = '2026-11-30';
-const LOCK_DAYS = 3;
-const PLAYERS = ['Beau', 'Annalise'];
-const CHECKS = [['water','💧','Drank water'],['workout','💪','Worked out'],['sleep','😴','Slept well'],['no_sugar','🍭','No refined sugar']];
-
-/* ---------- helpers (defined before any rendering) ---------- */
-const $ = id => document.getElementById(id);
-const pad = n => String(n).padStart(2, '0');
-const ymd = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-const parseD = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
-const addDays = (s, n) => { const d = parseD(s); d.setDate(d.getDate() + n); return ymd(d); };
-const daysBetween = (a, b) => Math.round((parseD(b) - parseD(a)) / 86400000);
-const todayStr = () => ymd(new Date());
-const fmtLong = s => parseD(s).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-const fmtShort = s => parseD(s).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-const fmtDow = s => parseD(s).toLocaleDateString('en-US', { weekday: 'short' });
-const num = n => Math.round(n).toLocaleString('en-US');
-const pts = steps => steps >= 3000 ? 1 + Math.floor((steps - 3000) / 1000) : 0;
-const TOTAL_DAYS = daysBetween(START, END) + 1;
-const LOCK_DATE = addDays(END, LOCK_DAYS);
-function phase(t) { if (t < START) return 'before'; if (t <= END) return 'live'; if (t <= LOCK_DATE) return 'grace'; return 'locked'; }
-// Ties share a rank (1, 1 rather than 1, 2)
-function rankOf(list, key) { return list.map(x => 1 + list.filter(y => y[key] > x[key]).length); }
-function store(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
-function recall(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
-
-/* ---------- state ---------- */
-let entries = { Beau: {}, Annalise: {} };
-let checks = { Beau: {}, Annalise: {} };
-let loaded = false, loading = false, saving = false;
-const savedName = recall('duelName');
-const sel = { player: PLAYERS.includes(savedName) ? savedName : null, date: null, toggles: {}, histPlayer: null, tab: 'board' };
-
-/* ---------- API ---------- */
-async function api(path, opts = {}) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12000);
-  try {
-    const r = await fetch(SB_URL + '/rest/v1/' + path, {
-      ...opts, signal: ctrl.signal,
-      headers: { apikey: SB_KEY, Authorization: 'Bearer ' + SB_KEY, 'Content-Type': 'application/json', ...(opts.headers || {}) }
-    });
-    const txt = await r.text();
-    let body = null; try { body = txt ? JSON.parse(txt) : null; } catch (e) {}
-    if (!r.ok) { const e = new Error((body && body.message) || ('HTTP ' + r.status)); e.status = r.status; throw e; }
-    return body;
-  } finally { clearTimeout(timer); }
-}
-
-async function loadAll() {
-  const [s, c] = await Promise.all([
-    api('duel_steps_entries?select=player,entry_date,steps&order=entry_date'),
-    api('duel_checkins?select=player,entry_date,water,workout,sleep,no_sugar&order=entry_date')
-  ]);
-  const E = { Beau: {}, Annalise: {} }, C = { Beau: {}, Annalise: {} };
-  for (const r of s || []) if (E[r.player]) E[r.player][r.entry_date] = r.steps;
-  for (const r of c || []) if (C[r.player]) C[r.player][r.entry_date] = r;
-  entries = E; checks = C;
-}
-
-// POST upsert first; if that fails, PATCH the existing row.
-async function upsert(table, row) {
-  try {
-    const res = await api(table + '?on_conflict=player,entry_date', {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates,return=representation' },
-      body: JSON.stringify(row)
-    });
-    if (Array.isArray(res) && res.length) return res[0];
-    throw new Error('Upsert returned no row');
-  } catch (e) {
-    const { player, entry_date, ...rest } = row;
-    const q = table + '?player=eq.' + encodeURIComponent(player) + '&entry_date=eq.' + entry_date;
-    let res;
-    try { res = await api(q, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(rest) }); }
-    catch (e2) { throw e; }
-    if (Array.isArray(res) && res.length) return res[0];
-    throw e;
-  }
-}
-
-async function refresh() {
-  if (loading || saving) return;
-  loading = true;
-  try {
-    await loadAll();
-    loaded = true;
-    $('errMsg').hidden = true;
-  } catch (e) {
-    $('errMsg').hidden = false;
-  } finally {
-    loading = false;
-    $('loadMsg').hidden = true;
-    render();
-  }
-}
-
-/* ---------- stats ---------- */
-function statsFor(p, t) {
-  const last = t < END ? t : END;
-  const days = [];
-  if (t >= START) for (let d = START; d <= last; d = addDays(d, 1)) days.push(d);
-  let points = 0, steps = 0, goal = 0;
-  for (const d of days) { const s = entries[p][d]; if (s != null) { points += pts(s); steps += s; if (s >= 3000) goal++; } }
-  let streak = 0, d = last;
-  if (d === t && entries[p][d] == null) d = addDays(d, -1); // today not logged yet doesn't break the streak
-  while (d >= START && (entries[p][d] || 0) >= 3000) { streak++; d = addDays(d, -1); }
-  let counted = days.length;
-  if (t <= END && entries[p][t] == null) counted -= 1;
-  const proj = t > END ? points : counted > 0 ? Math.round(points / counted * TOTAL_DAYS) : 0;
-  const wk = days.slice(-7);
-  const tally = CHECKS.map(([k, e]) => [e, wk.filter(x => checks[p][x] && checks[p][x][k]).length]);
-  return { p, points, miles: steps / 2000, goal, streak, proj, wkLen: wk.length, tally, elapsed: days.length };
-}
-
-/* ---------- render ---------- */
-function render() {
-  const t = todayStr(), ph = phase(t);
-  const day = Math.min(daysBetween(START, t) + 1, TOTAL_DAYS);
-  $('dayLabel').textContent = ph === 'before' ? 'Starts ' + fmtLong(START)
-    : ph === 'live' ? 'Day ' + day + ' of ' + TOTAL_DAYS + ' · ends ' + fmtShort(END)
-    : 'Ended ' + fmtLong(END);
-  const pm = $('phaseMsg');
-  if (ph === 'before') { pm.hidden = false; pm.textContent = 'The duel starts ' + fmtLong(START) + '. Logging opens that day.'; }
-  else pm.hidden = true;
-  renderBoard(t, ph); renderLog(t, ph); renderHistory(t, ph); renderRules();
-}
-
-function renderBoard(t, ph) {
-  const st = PLAYERS.map(p => statsFor(p, t));
-  const ranks = rankOf(st, 'points');
-  const order = st.map((s, i) => ({ s, r: ranks[i] })).sort((a, b) => a.r - b.r);
-  const [a, b] = order;
-  const diff = a.s.points - b.s.points;
-  let top = '';
-  if (ph === 'grace' || ph === 'locked') {
-    const head = diff === 0 ? 'It\'s a tie at ' + a.s.points + ' pts' : '🏆 ' + a.s.p + ' wins ' + a.s.points + '–' + b.s.points;
-    const note = ph === 'grace' ? 'Final results. Late logs accepted through ' + fmtLong(LOCK_DATE) + '.' : 'Final results. Logging is closed.';
-    top = '<div class="bib final" id="finalBanner">' + head + '<small>' + note + '</small></div>';
-  } else {
-    top = '<div class="bib margin" id="marginBib">' + (diff === 0 ? 'All square' : a.s.p + ' ' + diff + ' pt' + (diff === 1 ? '' : 's') + ' ahead') + '</div>';
-  }
-  const cards = order.map(({ s, r }) => {
-    const lead = r === 1 && diff !== 0 ? ' lead' : '';
-    return '<div class="card' + lead + '" data-player="' + s.p + '">' +
-      '<div class="rank">#' + r + '</div><div class="pname">' + s.p + '</div>' +
-      '<div class="big">' + s.points + '<span>pts</span></div>' +
-      '<div class="stat"><span>Miles</span><b>' + s.miles.toFixed(1) + '</b></div>' +
-      '<div class="stat"><span>Goal days</span><b>' + s.goal + '/' + s.elapsed + '</b></div>' +
-      '<div class="stat"><span>Streak</span><b>' + s.streak + (s.streak ? ' 🔥' : '') + '</b></div>' +
-      '<div class="stat"><span>' + (t > END ? 'Final' : 'Projected') + '</span><b>' + s.proj + '</b></div>' +
-      '<div class="tally" aria-label="Check-ins, last 7 days">' + s.tally.map(([e, n]) => '<span>' + e + ' ' + n + '/' + s.wkLen + '</span>').join('') + '</div>' +
-      '</div>';
-  }).join('');
-  $('tab-board').innerHTML = top + '<div class="duo">' + cards + '</div>' +
-    '<div class="sub" style="margin-top:10px">Check-ins count the last 7 days. Refreshes every minute.</div>';
-}
-
-function canLogDate(d, t) {
-  const ph = phase(t);
-  if (ph === 'before' || ph === 'locked') return false;
-  return d >= START && d <= (t < END ? t : END);
-}
-
-function defaultDate(t) { return t < START ? START : t > END ? END : t; }
-
-function renderLog(t, ph) {
-  const closed = ph === 'before' || ph === 'locked';
-  $('logClosed').hidden = !closed;
-  $('logForm').hidden = closed;
-  if (ph === 'before') $('logClosed').textContent = 'Logging opens ' + fmtLong(START) + '.';
-  if (ph === 'locked') $('logClosed').textContent = 'Logging closed on ' + fmtLong(LOCK_DATE) + '. Thanks for playing.';
-  if (closed) return;
-  if (!sel.date || !canLogDate(sel.date, t)) setDate(defaultDate(t), true);
-  $('namePick').innerHTML = PLAYERS.map(p => '<button data-name="' + p + '" aria-pressed="' + (sel.player === p) + '">' + p + '</button>').join('');
-  const y = addDays(t, -1);
-  $('todayBtn').hidden = t > END;
-  $('todayBtn').setAttribute('aria-pressed', sel.date === t);
-  $('yestBtn').disabled = !canLogDate(y, t);
-  $('yestBtn').setAttribute('aria-pressed', sel.date === y);
-  $('datePick').min = START; $('datePick').max = t < END ? t : END; $('datePick').value = sel.date;
-  $('forLabel').textContent = 'Logging for ' + fmtLong(sel.date);
-  const ex = sel.player ? entries[sel.player][sel.date] : null;
-  $('existHint').textContent = !sel.player ? 'Pick your name to start.'
-    : ex != null ? 'Already logged: ' + num(ex) + ' steps (' + pts(ex) + ' pts)' : 'No steps logged for this day yet.';
-  $('checkBtns').innerHTML = CHECKS.map(([k, e, label]) => '<button data-check="' + k + '" aria-pressed="' + !!sel.toggles[k] + '">' + e + ' ' + label + '</button>').join('');
-  updateLivePts();
-}
-
-function loadToggles() {
-  const c = sel.player ? checks[sel.player][sel.date] : null;
-  sel.toggles = {}; for (const [k] of CHECKS) sel.toggles[k] = !!(c && c[k]);
-}
-
-function setDate(d, quiet) {
-  sel.date = d; loadToggles();
-  if (!quiet) { $('stepsIn').value = ''; clearMsg(); }
-}
-
-function updateLivePts() {
-  const raw = $('stepsIn').value.trim().replace(/,/g, '');
-  $('livePts').textContent = raw === '' ? '0' : /^\d+$/.test(raw) ? pts(parseInt(raw, 10)) : '–';
-}
-
-function renderHistory(t, ph) {
-  if (!sel.histPlayer) sel.histPlayer = sel.player || 'Beau';
-  $('histPick').innerHTML = PLAYERS.map(p => '<button data-hist="' + p + '" aria-pressed="' + (sel.histPlayer === p) + '">' + p + '</button>').join('');
-  if (t < START) { $('histList').innerHTML = '<p class="sub">Nothing yet. The duel starts ' + fmtLong(START) + '.</p>'; return; }
-  const p = sel.histPlayer, last = t < END ? t : END, editable = ph === 'live' || ph === 'grace';
-  let html = '';
-  for (let d = last; d >= START; d = addDays(d, -1)) {
-    const s = entries[p][d], c = checks[p][d];
-    const icons = CHECKS.map(([k, e]) => '<span class="' + (c && c[k] ? '' : 'off') + '">' + e + '</span>').join('');
-    const has = s != null || !!c;
-    html += '<div class="row" data-date="' + d + '"><div class="d">' + fmtShort(d) + '</div>' +
-      '<div class="s">' + (s != null ? '<b>' + num(s) + '</b> steps · ' + pts(s) + ' pts' : '<span class="sub">No steps</span>') +
-      '<div class="ic">' + icons + '</div></div>' +
-      (editable ? '<button data-edit="' + d + '">' + (has ? 'Edit' : 'Add') + '</button>' : '<span></span>') + '</div>';
-  }
-  $('histList').innerHTML = html;
-}
-
-let rulesDone = false;
-function renderRules() {
-  if (rulesDone) return; rulesDone = true;
-  const ex = [2500, 3000, 4000, 7500, 10000, 15250];
-  $('tab-rules').innerHTML =
-    '<div class="card"><p><b>The goal:</b> 1.5 miles a day, about 3,000 steps. Hit it and you get 1 point.</p>' +
-    '<p><b>Bonus:</b> every full 1,000 steps over 3,000 adds another point.</p>' +
-    '<table><tr><th>Steps</th><th>Points</th></tr>' + ex.map(s => '<tr><td>' + num(s) + '</td><td>' + pts(s) + '</td></tr>').join('') + '</table>' +
-    '<p><b>Check-ins</b> (💧 water, 💪 workout, 😴 sleep, 🍭 no refined sugar) are for tracking only. They don\'t score points.</p>' +
-    '<ul><li>Runs ' + fmtLong(START) + ' through ' + fmtLong(END) + '.</li>' +
-    '<li>Log today or any past day. Future days are blocked.</li>' +
-    '<li>Late logs are accepted through ' + fmtLong(LOCK_DATE) + ', then logging locks.</li>' +
-    '<li>Miles are steps ÷ 2,000. Projected points assume your pace so far holds.</li>' +
-    '<li>Most points on ' + fmtShort(END) + ' wins. Ties share a rank.</li></ul></div>';
-}
-
-/* ---------- save ---------- */
-function clearMsg() { const m = $('saveMsg'); m.className = 'msg'; m.textContent = ''; }
-function showMsg(text, ok) { const m = $('saveMsg'); m.className = 'msg ' + (ok ? 'ok' : 'bad'); m.textContent = text; }
-
-function friendlyError(e) {
-  const m = (e && e.message) || '';
-  if (/future/i.test(m)) return 'That date hasn\'t happened yet.';
-  if (/check constraint|violates/i.test(m)) return 'That entry isn\'t allowed (check the date and number).';
-  if (e && e.name === 'AbortError') return 'The server took too long. Try again in a moment.';
-  return 'Couldn\'t save. Check your connection and try again.';
-}
-
-async function save() {
-  if (saving) return;
-  clearMsg();
-  const t = todayStr(), player = sel.player, date = sel.date;
-  if (!player) return showMsg('Pick your name first.', false);
-  if (!canLogDate(date, t)) return showMsg('You can\'t log that date.', false);
-  const raw = $('stepsIn').value.trim().replace(/,/g, '');
-  let steps = null;
-  if (raw !== '') {
-    if (!/^\d+$/.test(raw)) return showMsg('Whole numbers only, with no decimals or letters.', false);
-    steps = parseInt(raw, 10);
-    if (steps > 80000) return showMsg('80,000 is the most you can log for one day.', false);
-    if (steps < 1000 && !confirm('Only ' + num(steps) + ' steps? Check for a missing zero.\n\nSave anyway?')) return;
-    if (steps > 40000 && !confirm(num(steps) + ' steps is a lot. Make sure it\'s one day, not a weekly total.\n\nSave anyway?')) return;
-    const ex = entries[player][date];
-    if (ex != null && ex !== steps && !confirm(player + ' already has ' + num(ex) + ' for ' + fmtDow(date) + '. Replace?')) return;
-  }
-  const exC = checks[player][date];
-  const ck = {}; for (const [k] of CHECKS) ck[k] = !!sel.toggles[k];
-  const ckChanged = CHECKS.some(([k]) => ck[k] !== !!(exC && exC[k]));
-  if (steps === null && !ckChanged) return showMsg('Enter your steps or tap a check-in.', false);
-
-  saving = true;
-  const btn = $('saveBtn'); btn.disabled = true; btn.textContent = 'Saving…';
-  try {
-    if (steps !== null) await upsert('duel_steps_entries', { player, entry_date: date, steps });
-    if (ckChanged) await upsert('duel_checkins', { player, entry_date: date, ...ck });
-    await loadAll();
-    const okS = steps === null || entries[player][date] === steps;
-    const nc = checks[player][date];
-    const okC = !ckChanged || (nc && CHECKS.every(([k]) => !!nc[k] === ck[k]));
-    if (!okS || !okC) throw new Error('verify');
-    $('stepsIn').value = '';
-    saving = false;
-    render();
-    const what = steps !== null ? num(steps) + ' steps, ' + pts(steps) + ' pts' : 'check-ins';
-    showMsg('Saved: ' + player + ', ' + fmtShort(date) + ' (' + what + ')', true);
-  } catch (e) {
-    showMsg(e.message === 'verify' ? 'Save couldn\'t be confirmed. Try again.' : friendlyError(e), false);
-  } finally {
-    saving = false; btn.disabled = false; btn.textContent = 'Save';
-  }
-}
-
-/* ---------- events ---------- */
-function showTab(tab) {
-  sel.tab = tab;
-  for (const b of document.querySelectorAll('nav button')) b.setAttribute('aria-selected', b.dataset.tab === tab);
-  for (const s of ['board', 'log', 'history', 'rules']) $('tab-' + s).hidden = s !== tab;
-  window.scrollTo(0, 0);
-}
-document.querySelector('nav').addEventListener('click', e => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
-$('namePick').addEventListener('click', e => {
-  const b = e.target.closest('button'); if (!b) return;
-  sel.player = b.dataset.name; store('duelName', sel.player); setDate(sel.date); render();
-});
-$('todayBtn').addEventListener('click', () => { setDate(todayStr()); render(); });
-$('yestBtn').addEventListener('click', () => { setDate(addDays(todayStr(), -1)); render(); });
-$('datePick').addEventListener('change', e => {
-  const v = e.target.value;
-  if (v && canLogDate(v, todayStr())) { setDate(v); render(); }
-  else { showMsg('Pick a date between ' + fmtShort(START) + ' and today.', false); e.target.value = sel.date; }
-});
-$('stepsIn').addEventListener('input', updateLivePts);
-$('stepsIn').addEventListener('keydown', e => { if (e.key === 'Enter') save(); });
-$('checkBtns').addEventListener('click', e => {
-  const b = e.target.closest('button'); if (!b) return;
-  const k = b.dataset.check; sel.toggles[k] = !sel.toggles[k]; b.setAttribute('aria-pressed', sel.toggles[k]);
-});
-$('saveBtn').addEventListener('click', save);
-$('histPick').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { sel.histPlayer = b.dataset.hist; render(); } });
-$('histList').addEventListener('click', e => {
-  const b = e.target.closest('button[data-edit]'); if (!b) return;
-  sel.player = sel.histPlayer; store('duelName', sel.player);
-  setDate(b.dataset.edit);
-  const s = entries[sel.player][sel.date];
-  render();
-  $('stepsIn').value = s != null ? String(s) : ''; updateLivePts();
-  showTab('log');
-});
-$('retryBtn').addEventListener('click', () => { $('loadMsg').hidden = false; refresh(); });
-$('themeBtn').addEventListener('click', () => {
-  const dark = document.documentElement.dataset.theme
-    ? document.documentElement.dataset.theme === 'dark'
-    : matchMedia('(prefers-color-scheme: dark)').matches;
-  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
-  store('duelTheme', document.documentElement.dataset.theme);
-});
-const th = recall('duelTheme'); if (th) document.documentElement.dataset.theme = th;
-
-setInterval(refresh, 60000);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
-window.addEventListener('pageshow', e => { if (e.persisted) refresh(); });
-
-render();
-refresh();
-</script>
-</body>
-</html>
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN6am1mb2ljeHptZGNlc2VoY3ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc0Mzg4MDUsImV4cCI6MjA5MzAxNDgwNX0.4PtF0yCzkT
